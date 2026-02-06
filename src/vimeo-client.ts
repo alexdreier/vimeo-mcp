@@ -3,6 +3,16 @@ import { VimeoError, RateLimitError } from "./errors.js";
 import fs from "fs";
 import path from "path";
 
+// Standard BoardSync video settings applied to all uploads by default
+export const BOARDSYNC_DEFAULT_SETTINGS = {
+  privacy: {
+    view: "disable",
+    embed: "whitelist",
+    download: false,
+    comments: "nobody",
+  },
+};
+
 interface VimeoClientConfig {
   clientId?: string;
   clientSecret?: string;
@@ -17,6 +27,13 @@ interface ListVideosParams {
   direction?: string;
   compact?: boolean;
   fields?: string[];
+}
+
+interface ListFoldersParams {
+  page?: number;
+  per_page?: number;
+  sort?: string;
+  direction?: string;
 }
 
 type VideoResponseMode = 'full' | 'compact' | 'minimal';
@@ -216,6 +233,24 @@ export class VimeoClient {
         this.client.request({ method, path, query: params }, callback);
       }
     });
+  }
+
+  async listFolders(params: ListFoldersParams) {
+    const queryParams: any = {
+      page: params.page || 1,
+      per_page: params.per_page || 20,
+    };
+
+    if (params.sort) {
+      queryParams.sort = params.sort;
+    }
+    if (params.direction) {
+      queryParams.direction = params.direction;
+    }
+
+    return this.executeWithRateLimit(() =>
+      this.makeApiCall("GET", "/me/projects", queryParams)
+    );
   }
 
   async listVideos(params: ListVideosParams) {
@@ -842,6 +877,48 @@ ${topicsSection}
     fs.writeFileSync(suggestionsPath, markdown);
     
     return suggestionsPath;
+  }
+
+  async uploadVideo(
+    filePath: string,
+    params: { name?: string; description?: string } = {}
+  ): Promise<string> {
+    if (!fs.existsSync(filePath)) {
+      throw new VimeoError(`File not found: ${filePath}`, 400);
+    }
+
+    return new Promise<string>((resolve, reject) => {
+      this.client.upload(
+        filePath,
+        params,
+        (uri: string) => {
+          resolve(uri);
+        },
+        (bytesUploaded: number, bytesTotal: number) => {
+          const pct = ((bytesUploaded / bytesTotal) * 100).toFixed(1);
+          console.error(`Upload progress: ${pct}%`);
+        },
+        (error: string) => {
+          reject(new VimeoError(`Upload failed: ${error}`, 500));
+        }
+      );
+    });
+  }
+
+  async addVideoToFolder(videoUri: string, folderId: string): Promise<void> {
+    // videoUri is like "/videos/123456789" — extract the ID
+    const videoId = videoUri.replace("/videos/", "");
+    const apiPath = `/me/projects/${folderId}/videos/${videoId}`;
+    await this.executeWithRateLimit(() =>
+      this.makeApiCall("PUT", apiPath, {})
+    );
+  }
+
+  async applyDefaultSettings(videoUri: string): Promise<any> {
+    const videoId = videoUri.replace("/videos/", "");
+    return this.executeWithRateLimit(() =>
+      this.makeApiCall("PATCH", `/videos/${videoId}`, BOARDSYNC_DEFAULT_SETTINGS)
+    );
   }
 
   private convertWebVTTToSRT(webvtt: string): string {

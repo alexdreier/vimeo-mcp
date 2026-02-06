@@ -57,6 +57,21 @@ const DownloadTranscriptToFileSchema = z.object({
   base_path: z.string().default("./downloads/vimeo").optional().describe("Base directory path for saving files (relative to current working directory)"),
 });
 
+const ListFoldersSchema = z.object({
+  page: z.number().min(1).default(1).optional(),
+  per_page: z.number().min(1).max(50).default(20).optional(),
+  sort: z.enum(["date", "name", "modified_time"]).optional(),
+  direction: z.enum(["asc", "desc"]).optional(),
+});
+
+const UploadVideoSchema = z.object({
+  file_path: z.string().describe("Absolute path to the video file to upload"),
+  title: z.string().optional().describe("Title for the uploaded video"),
+  description: z.string().optional().describe("Description for the uploaded video"),
+  folder_id: z.string().optional().describe("Folder/project ID to add the video to (e.g., '28009607' for Module Videos)"),
+  apply_defaults: z.boolean().default(true).optional().describe("Apply BoardSync default settings (privacy=disable, embed=whitelist, download=off, comments=nobody). Default: true"),
+});
+
 const GenerateContentAnalysisSchema = z.object({
   video_id: z.string().describe("The ID of the video"),
   base_path: z.string().default("./downloads/vimeo").optional().describe("Base directory path for saving files (relative to current working directory)"),
@@ -291,22 +306,80 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "vimeo_list_folders",
+    description: "List folders (projects) in the authenticated user's Vimeo account",
+    inputSchema: {
+      type: "object",
+      properties: {
+        page: { type: "number", minimum: 1, default: 1 },
+        per_page: {
+          type: "number",
+          minimum: 1,
+          maximum: 50,
+          default: 20,
+          description: "Number of folders to return per page",
+        },
+        sort: {
+          type: "string",
+          enum: ["date", "name", "modified_time"],
+          description: "Sort order for the results",
+        },
+        direction: {
+          type: "string",
+          enum: ["asc", "desc"],
+          description: "Sort direction",
+        },
+      },
+    },
+  },
+  {
     name: "vimeo_generate_content_analysis",
     description: "Generate comprehensive content analysis and title/description suggestions as markdown file",
     inputSchema: {
       type: "object",
       properties: {
-        video_id: { 
-          type: "string", 
+        video_id: {
+          type: "string",
           description: "The ID of the video"
         },
-        base_path: { 
-          type: "string", 
+        base_path: {
+          type: "string",
           default: "./downloads/vimeo",
           description: "Base directory path for saving files (relative to current working directory)"
         },
       },
       required: ["video_id"],
+    },
+  },
+  {
+    name: "vimeo_upload_video",
+    description: "Upload a video file to Vimeo. By default applies BoardSync standard settings (privacy=disable, embed=whitelist, download=off, comments=nobody). Optionally adds the video to a folder.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_path: {
+          type: "string",
+          description: "Absolute path to the video file to upload",
+        },
+        title: {
+          type: "string",
+          description: "Title for the uploaded video",
+        },
+        description: {
+          type: "string",
+          description: "Description for the uploaded video",
+        },
+        folder_id: {
+          type: "string",
+          description: "Folder/project ID to add the video to (e.g., '28009607' for Module Videos)",
+        },
+        apply_defaults: {
+          type: "boolean",
+          default: true,
+          description: "Apply BoardSync default settings (privacy=disable, embed=whitelist, download=off, comments=nobody). Default: true",
+        },
+      },
+      required: ["file_path"],
     },
   },
 ];
@@ -369,8 +442,12 @@ class VimeoMCPServer {
             return await this.handleGetVideoStats(args);
           case "vimeo_download_transcript_to_file":
             return await this.handleDownloadTranscriptToFile(args);
+          case "vimeo_list_folders":
+            return await this.handleListFolders(args);
           case "vimeo_generate_content_analysis":
             return await this.handleGenerateContentAnalysis(args);
+          case "vimeo_upload_video":
+            return await this.handleUploadVideo(args);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -698,6 +775,20 @@ class VimeoMCPServer {
     };
   }
 
+  private async handleListFolders(args: unknown) {
+    const params = ListFoldersSchema.parse(args);
+    const folders = await this.vimeoClient!.listFolders(params);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(folders, null, 2),
+        },
+      ],
+    };
+  }
+
   private async handleGenerateContentAnalysis(args: unknown) {
     const params = GenerateContentAnalysisSchema.parse(args);
     const filePath = await this.vimeoClient!.generateContentAnalysisFile(
@@ -710,6 +801,44 @@ class VimeoMCPServer {
         {
           type: "text",
           text: `Content analysis and suggestions generated successfully to: ${filePath}`,
+        },
+      ],
+    };
+  }
+
+  private async handleUploadVideo(args: unknown) {
+    const params = UploadVideoSchema.parse(args);
+    const steps: string[] = [];
+
+    // 1. Upload the video
+    const uploadParams: { name?: string; description?: string } = {};
+    if (params.title) uploadParams.name = params.title;
+    if (params.description) uploadParams.description = params.description;
+
+    const videoUri = await this.vimeoClient!.uploadVideo(params.file_path, uploadParams);
+    const videoId = videoUri.replace("/videos/", "");
+    steps.push(`Uploaded video: ${videoUri}`);
+
+    // 2. Apply default settings if requested (default: true)
+    if (params.apply_defaults !== false) {
+      await this.vimeoClient!.applyDefaultSettings(videoUri);
+      steps.push("Applied BoardSync default settings (privacy=disable, embed=whitelist, download=off, comments=nobody)");
+    }
+
+    // 3. Add to folder if specified
+    if (params.folder_id) {
+      await this.vimeoClient!.addVideoToFolder(videoUri, params.folder_id);
+      steps.push(`Added to folder ${params.folder_id}`);
+    }
+
+    // 4. Fetch final video details
+    const details = await this.vimeoClient!.getVideoDetails(videoId);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Video uploaded successfully!\n\n${steps.map(s => `- ${s}`).join("\n")}\n\nVideo details:\n${JSON.stringify(details, null, 2)}`,
         },
       ],
     };

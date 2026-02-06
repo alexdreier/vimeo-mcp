@@ -10,6 +10,13 @@ declare module "@vimeo/vimeo" {
       },
       callback: (error: any, body: any, statusCode: number, headers: any) => void
     ): void;
+    upload(
+      file: string,
+      params: Record<string, any>,
+      completeCallback: (uri: string) => void,
+      progressCallback: (bytesUploaded: number, bytesTotal: number) => void,
+      errorCallback: (error: string) => void
+    ): void;
   }
   
   const vimeoModule: {
